@@ -19,10 +19,10 @@ import (
 	"unsafe"
 )
 
-const (
-	djiUSBVendorID  = 0x2c7c
-	djiUSBProductID = 0x0125
-)
+var supportedUSBIDs = [][2]uint16{
+	{0x2ca3, 0x4006}, // DJI original
+	{0x2c7c, 0x0125}, // Quectel EC25 (flashed)
+}
 
 type usbAT struct {
 	ctx         *C.libusb_context
@@ -50,13 +50,25 @@ func openDJIUSBAT() (*usbAT, error) {
 	if rc := C.libusb_init(&ctx); rc != 0 {
 		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
 	}
-	debug("libusb_init OK, trying to open", fmt.Sprintf("%04x:%04x", djiUSBVendorID, djiUSBProductID))
-	handle := C.libusb_open_device_with_vid_pid(ctx, djiUSBVendorID, djiUSBProductID)
-	if handle == nil {
-		debug("device not found by VID/PID")
-		C.libusb_exit(ctx)
-		return nil, errors.New("USB AT device 2c7c:0125 not found")
+	debug("libusb_init OK, trying supported USB IDs")
+	var handle *C.libusb_device_handle
+	var foundID [2]uint16
+	for _, id := range supportedUSBIDs {
+		debug(fmt.Sprintf("trying %04x:%04x", id[0], id[1]))
+		h := C.libusb_open_device_with_vid_pid(ctx, C.uint16_t(id[0]), C.uint16_t(id[1]))
+		if h != nil {
+			handle = h
+			foundID = id
+			debug(fmt.Sprintf("device found at %04x:%04x", id[0], id[1]))
+			break
+		}
 	}
+	if handle == nil {
+		debug("no supported USB device found")
+		C.libusb_exit(ctx)
+		return nil, errors.New("no supported USB device found (expected 2ca3:4006 or 2c7c:0125)")
+	}
+	_ = foundID
 	debug("device opened OK")
 	candidates, err := usbATCandidates(handle)
 	if err != nil {

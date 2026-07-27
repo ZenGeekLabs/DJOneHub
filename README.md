@@ -20,7 +20,7 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 | 网络与流量 | 已实现 | 查看 USB 网卡、默认出口、代理连通性、实时速度和本次流量 |
 | AT 调试 | 已实现 | 在网页中直接向模块发送 AT 指令 |
 | 深浅色外观 | 已实现 | 支持浅色、深色和跟随系统 |
-| Intel Mac | 尚未发布 | 当前预览发行包仅提供 Apple Silicon 版本 |
+| Intel Mac | 已实现 | 支持从源码构建，同时兼容 Apple Silicon 和 Intel Mac |
 
 ## 接入准备
 
@@ -29,15 +29,15 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 - 大疆第一代 4G 模块
 - 可正常使用的实体 SIM，或与当前实现兼容的实体 eUICC/eSIM 卡片
 - 支持数据传输的 USB-C 线缆
-- Apple Silicon Mac
+- Apple Silicon 或 Intel Mac
 
-模块的 USB 设备标识通常为 `2ca3:4006`。如果连接后 macOS 完全没有发现 USB 设备，请优先确认线缆支持数据传输。
+模块的 USB 设备标识为 `2ca3:4006`（大疆原始）或 `2c7c:0125`（刷入移远 EC25 固件后）。如果连接后 macOS 完全没有发现 USB 设备，请优先确认线缆支持数据传输。
 
 ### 系统
 
 - macOS 13 Ventura 或更新版本
-- 当前发行包支持 Apple Silicon，即 M1、M2、M3、M4 及后续 Apple 芯片
-- Intel Mac 版本尚未发布和真机验证
+- 支持 Apple Silicon（M1/M2/M3/M4）和 Intel Mac
+- 从源码构建可自动适配当前架构
 
 发行包已经携带运行所需的 `libusb`。普通用户不需要安装 Homebrew、Go、Node.js 或其他开发环境。
 
@@ -296,22 +296,31 @@ rm -rf "$HOME/Library/Application Support/DJOneHub"
 
 源码仓库面向开发者。普通用户应优先下载 Releases 中已经打包好的 ZIP。
 
-构建 Apple Silicon 发行包需要：
+### 通用构建（自动适配架构）
 
-- Apple Silicon Mac
+适用于 Apple Silicon 和 Intel Mac，自动检测当前架构：
+
 - macOS 13 或更新版本
 - Xcode Command Line Tools
 - Go 1.26.3 或兼容版本
-- `pkg-config`
-- 可访问 GitHub Release 的网络，用于下载并校验官方 libusb 1.0.30 源码
+- `pkg-config`（`brew install pkg-config`）
+- `libusb`（`brew install libusb`）
 
-运行测试：
+构建命令：
 
 ```sh
-go test ./...
+./scripts/build-macos.sh
 ```
 
-构建发行包：
+生成的二进制位于 `dist/djonehub-macos`，可直接运行：
+
+```sh
+./dist/djonehub-macos
+```
+
+### 构建正式发行包
+
+构建包含 libusb 的完整发行包需要额外下载 libusb 源码：
 
 ```sh
 ./scripts/package-macos-arm64.sh v0.1.0-preview
@@ -321,6 +330,12 @@ go test ./...
 
 ```text
 dist/release/
+```
+
+运行测试：
+
+```sh
+go test ./...
 ```
 
 ## 常见问题
@@ -355,7 +370,7 @@ macOS 的代理配置与网络服务相关。切换到 USB 网卡后，可能需
 
 ## 当前限制
 
-- 当前发行包只支持 Apple Silicon，Intel 版本尚未发布和真机验证。
+- 当前发行包仅提供 Apple Silicon 版本，Intel Mac 需从源码构建。
 - 模式 2 和模式 3 尚未确定稳定用途。
 - 不同 SIM、eUICC、运营商、漫游环境和模块固件的兼容性可能不同。
 - 流量统计仅供参考，不等同于运营商账单。
