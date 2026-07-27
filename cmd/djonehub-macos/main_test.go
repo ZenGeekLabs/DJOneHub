@@ -37,6 +37,36 @@ func TestParseUSBNetMode(t *testing.T) {
 	}
 }
 
+func TestParseUSBATOperator(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{
+			name:     "known numeric PLMN",
+			response: "AT+COPS?\r\n+COPS: 0,2,\"46015\",7\r\nOK",
+			want:     "中国广电",
+		},
+		{
+			name:     "long operator name",
+			response: "+COPS: 0,0,\"CHN-UNICOM\",7\r\nOK",
+			want:     "CHN-UNICOM",
+		},
+		{
+			name:     "missing operator",
+			response: "+COPS: 0\r\nOK",
+			want:     "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseUSBATOperator(tt.response); got != tt.want {
+				t.Fatalf("parseUSBATOperator(%q) = %q, want %q", tt.response, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInitUSBATESIMManagerAfterDelayedUSBOpen(t *testing.T) {
 	instance := &app{}
 

@@ -823,6 +823,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 	csqResp, _ := a.usbAT.Command("AT+CSQ", 3*time.Second)
 	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 3*time.Second)
 	cregResp, _ := a.usbAT.Command("AT+CREG?", 3*time.Second)
+	_, _ = a.usbAT.Command("AT+COPS=3,2", 3*time.Second)
 	copsResp, _ := a.usbAT.Command("AT+COPS?", 3*time.Second)
 	qccidResp, _ := a.usbAT.Command("AT+QCCID", 3*time.Second)
 	cimiResp, _ := a.usbAT.Command("AT+CIMI", 3*time.Second)
@@ -927,7 +928,7 @@ func parseUSBATOperator(resp string) string {
 	if len(match) != 2 {
 		return ""
 	}
-	return match[1]
+	return modem.ResolveServingOperatorNameFromPLMN(match[1])
 }
 
 func firstNonZeroRegistration(responses ...string) int {
