@@ -12,6 +12,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,8 @@ import (
 )
 
 const (
-	djiUSBVendorID  = 0x2ca3
-	djiUSBProductID = 0x4006
+	djiUSBVendorID  = 0x2c7c
+	djiUSBProductID = 0x0125
 )
 
 type usbAT struct {
@@ -38,28 +39,43 @@ type usbATCandidate struct {
 	endpointOut byte
 }
 
+func debug(args ...interface{}) {
+	fmt.Fprintln(os.Stderr, append([]interface{}{"[DJOneHub-DEBUG]"}, args...)...)
+}
+
 func openDJIUSBAT() (*usbAT, error) {
+	debug("openDJIUSBAT: starting")
 	var ctx *C.libusb_context
+	debug("calling libusb_init")
 	if rc := C.libusb_init(&ctx); rc != 0 {
 		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
 	}
+	debug("libusb_init OK, trying to open", fmt.Sprintf("%04x:%04x", djiUSBVendorID, djiUSBProductID))
 	handle := C.libusb_open_device_with_vid_pid(ctx, djiUSBVendorID, djiUSBProductID)
 	if handle == nil {
+		debug("device not found by VID/PID")
 		C.libusb_exit(ctx)
-		return nil, errors.New("DJI USB AT device 2ca3:4006 not found")
+		return nil, errors.New("USB AT device 2c7c:0125 not found")
 	}
+	debug("device opened OK")
 	candidates, err := usbATCandidates(handle)
 	if err != nil {
+		debug("usbATCandidates error:", err)
 		C.libusb_close(handle)
 		C.libusb_exit(ctx)
 		return nil, err
 	}
+	debug("found", len(candidates), "interface candidates")
 	var lastErr error
-	for _, candidate := range candidates {
+	for i, candidate := range candidates {
+		debug(fmt.Sprintf("candidate %d: iface=%d out=0x%02x in=0x%02x", i, candidate.iface, candidate.endpointOut, candidate.endpointIn))
+		debug("claiming interface", candidate.iface)
 		if rc := C.libusb_claim_interface(handle, C.int(candidate.iface)); rc != 0 {
 			lastErr = fmt.Errorf("claim USB AT interface %d: %s", candidate.iface, usbErrorName(rc))
+			debug("claim failed:", lastErr)
 			continue
 		}
+		debug("interface claimed, sending AT probe")
 		dev := &usbAT{
 			ctx:         ctx,
 			handle:      handle,
@@ -68,6 +84,7 @@ func openDJIUSBAT() (*usbAT, error) {
 			endpointOut: candidate.endpointOut,
 		}
 		if response, err := dev.Command("AT", 900*time.Millisecond); err == nil && atProbeSucceeded(response) {
+			debug("AT probe succeeded!")
 			return dev, nil
 		} else {
 			if err == nil {
@@ -75,15 +92,17 @@ func openDJIUSBAT() (*usbAT, error) {
 			}
 			lastErr = fmt.Errorf("probe USB AT interface %d out 0x%02x in 0x%02x: %w",
 				candidate.iface, candidate.endpointOut, candidate.endpointIn, err)
+			debug("probe failed:", lastErr)
 		}
 		C.libusb_release_interface(handle, C.int(candidate.iface))
 	}
+	debug("all candidates failed")
 	C.libusb_close(handle)
 	C.libusb_exit(ctx)
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, errors.New("no USB bulk interface candidates found for DJI AT bridge")
+	return nil, errors.New("no USB bulk interface candidates found for AT bridge")
 }
 
 func usbATCandidates(handle *C.libusb_device_handle) ([]usbATCandidate, error) {
@@ -197,11 +216,9 @@ func (u *usbAT) Command(cmd string, timeout time.Duration) (string, error) {
 	if len(chunks) == 0 {
 		return "", errors.New("USB AT command timed out without response")
 	}
-	return normalizeATResponse(strings.Join(chunks, "")), nil
+	return normalizeATResponse(strings.Join(chunks, "")), errors.New("USB AT command timed out before completion")
 }
 
-// CommandWithPrompt executes an AT command that enters an interactive input
-// state, then submits followUp after the modem returns its ">" prompt.
 func (u *usbAT) CommandWithPrompt(cmd string, followUp []byte, timeout time.Duration) (string, error) {
 	if u == nil {
 		return "", errors.New("USB AT device is not open")
@@ -272,7 +289,6 @@ func (u *usbAT) CommandWithPrompt(cmd string, followUp []byte, timeout time.Dura
 	}
 
 	if promptReceived {
-		// ESC cancels a pending message editor on modems that still accept input.
 		_ = u.bulkWriteLocked(u.endpointOut, []byte{0x1b}, 300*time.Millisecond)
 	}
 	if response.Len() == 0 {
@@ -295,7 +311,7 @@ func (u *usbAT) Description() string {
 	if u == nil {
 		return "USB AT"
 	}
-	return fmt.Sprintf("USB AT · 2ca3:4006 interface %d out 0x%02x in 0x%02x",
+	return fmt.Sprintf("USB AT · 2c7c:0125 interface %d out 0x%02x in 0x%02x",
 		u.iface, u.endpointOut, u.endpointIn)
 }
 
@@ -363,8 +379,6 @@ func atResponseHasPrompt(resp string) bool {
 	return strings.HasSuffix(trimmed, ">")
 }
 
-// A probe must receive OK. ERROR merely proves that a bulk interface accepted
-// bytes; it is not the modem's AT channel (the QMI interface can do that).
 func atProbeSucceeded(resp string) bool {
 	normalized := strings.ReplaceAll(strings.TrimSpace(resp), "\r\n", "\n")
 	return normalized == "OK" || strings.HasSuffix(normalized, "\nOK")
