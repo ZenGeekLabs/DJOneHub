@@ -427,7 +427,7 @@ func discoverDJIUSBDevice() *usbDeviceStatus {
 	for _, block := range strings.Split(string(out), "\n\n") {
 		vendorID, okVendor := intProperty(block, "idVendor")
 		productID, okProduct := intProperty(block, "idProduct")
-		if !okVendor || !okProduct || vendorID != 0x2ca3 {
+		if !okVendor || !okProduct || (vendorID != 0x2ca3 && vendorID != 0x2c7c) {
 			continue
 		}
 		if device == nil {
