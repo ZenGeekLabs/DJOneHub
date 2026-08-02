@@ -12,20 +12,19 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 )
 
-const (
-	djiUSBVendorID  = 0x2ca3
-	djiUSBProductID = 0x4006
-)
-
 type usbAT struct {
 	ctx         *C.libusb_context
 	handle      *C.libusb_device_handle
+	vendorID    int
+	productID   int
+	locationID  uint32
 	iface       int
 	endpointIn  byte
 	endpointOut byte
@@ -38,15 +37,52 @@ type usbATCandidate struct {
 	endpointOut byte
 }
 
-func openDJIUSBAT() (*usbAT, error) {
+func openDJIUSBAT(locationID string) (*usbAT, error) {
 	var ctx *C.libusb_context
 	if rc := C.libusb_init(&ctx); rc != 0 {
 		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
 	}
-	handle := C.libusb_open_device_with_vid_pid(ctx, djiUSBVendorID, djiUSBProductID)
+	desiredLocation, err := parseUSBLocationID(locationID)
+	if err != nil {
+		C.libusb_exit(ctx)
+		return nil, err
+	}
+	var handle *C.libusb_device_handle
+	var selectedID usbDeviceID
+	var selectedLocation uint32
+	var list **C.libusb_device
+	count := C.libusb_get_device_list(ctx, &list)
+	if count < 0 {
+		C.libusb_exit(ctx)
+		return nil, fmt.Errorf("list USB devices: %s", usbErrorName(C.int(count)))
+	}
+	defer C.libusb_free_device_list(list, 1)
+	for _, device := range unsafe.Slice(list, int(count)) {
+		var descriptor C.struct_libusb_device_descriptor
+		if C.libusb_get_device_descriptor(device, &descriptor) != 0 {
+			continue
+		}
+		vendorID, productID := int(descriptor.idVendor), int(descriptor.idProduct)
+		if !isSupportedDJIUSBDevice(vendorID, productID) {
+			continue
+		}
+		candidateLocation := libusbLocationID(device)
+		if desiredLocation != 0 && candidateLocation != desiredLocation {
+			continue
+		}
+		if C.libusb_open(device, &handle) != 0 || handle == nil {
+			continue
+		}
+		selectedID = usbDeviceID{vendorID: vendorID, productID: productID}
+		selectedLocation = candidateLocation
+		break
+	}
 	if handle == nil {
 		C.libusb_exit(ctx)
-		return nil, errors.New("DJI USB AT device 2ca3:4006 not found")
+		if desiredLocation != 0 {
+			return nil, fmt.Errorf("supported DJI USB AT device at 0x%x not found", desiredLocation)
+		}
+		return nil, errors.New("supported DJI USB AT device not found (expected 2ca3:4006 or 2c7c:0125)")
 	}
 	candidates, err := usbATCandidates(handle)
 	if err != nil {
@@ -63,6 +99,9 @@ func openDJIUSBAT() (*usbAT, error) {
 		dev := &usbAT{
 			ctx:         ctx,
 			handle:      handle,
+			vendorID:    selectedID.vendorID,
+			productID:   selectedID.productID,
+			locationID:  selectedLocation,
 			iface:       candidate.iface,
 			endpointIn:  candidate.endpointIn,
 			endpointOut: candidate.endpointOut,
@@ -84,6 +123,28 @@ func openDJIUSBAT() (*usbAT, error) {
 		return nil, lastErr
 	}
 	return nil, errors.New("no USB bulk interface candidates found for DJI AT bridge")
+}
+
+func parseUSBLocationID(value string) (uint32, error) {
+	value = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(value), "0x"))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.ParseUint(value, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid USB location ID %q: %w", value, err)
+	}
+	return uint32(parsed), nil
+}
+
+func libusbLocationID(device *C.libusb_device) uint32 {
+	location := uint32(C.libusb_get_bus_number(device)) << 24
+	var ports [8]C.uint8_t
+	count := int(C.libusb_get_port_numbers(device, &ports[0], C.int(len(ports))))
+	for index := 0; index < count && index < 5; index++ {
+		location |= uint32(ports[index]&0x0f) << uint(20-index*4)
+	}
+	return location
 }
 
 func usbATCandidates(handle *C.libusb_device_handle) ([]usbATCandidate, error) {
@@ -295,8 +356,8 @@ func (u *usbAT) Description() string {
 	if u == nil {
 		return "USB AT"
 	}
-	return fmt.Sprintf("USB AT · 2ca3:4006 interface %d out 0x%02x in 0x%02x",
-		u.iface, u.endpointOut, u.endpointIn)
+	return fmt.Sprintf("USB AT · %04x:%04x @ 0x%x interface %d out 0x%02x in 0x%02x",
+		u.vendorID, u.productID, u.locationID, u.iface, u.endpointOut, u.endpointIn)
 }
 
 func (u *usbAT) bulkWriteLocked(endpoint byte, payload []byte, timeout time.Duration) error {

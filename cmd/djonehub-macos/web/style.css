@@ -72,6 +72,9 @@ p { margin: 6px 0 0; color: #657286; line-height: 1.45; }
 
 .header-actions, .heading-actions, .control-panel, .profile-actions, .sms-actions { display: flex; align-items: center; gap: 8px; }
 .header-actions { justify-content: flex-end; flex-wrap: wrap; }
+.device-picker { display: grid; gap: 4px; min-width: 190px; }
+.device-picker span { color: #748196; font-size: 11px; font-weight: 650; }
+.device-picker select { min-height: 34px; padding: 0 30px 0 10px; border: 1px solid #cbd3df; border-radius: 6px; background: var(--surface); color: var(--text-strong); font-size: 13px; }
 .theme-switch { display: grid; grid-template-columns: repeat(3, auto); padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
 .theme-option { min-height: 28px; padding: 0 9px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 12px; }
 .theme-option:hover:not(:disabled) { border: 0; background: var(--surface-hover); color: var(--text-strong); }

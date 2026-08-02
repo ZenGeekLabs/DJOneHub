@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPortScore(t *testing.T) {
 	tests := []struct {
@@ -19,6 +22,69 @@ func TestPortScore(t *testing.T) {
 				t.Fatalf("portScore(%q) = %d, want %d", tt.port, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsSupportedDJIUSBDevice(t *testing.T) {
+	tests := []struct {
+		name      string
+		vendorID  int
+		productID int
+		want      bool
+	}{
+		{name: "DJI management mode", vendorID: 0x2ca3, productID: 0x4006, want: true},
+		{name: "Quectel compatible mode", vendorID: 0x2c7c, productID: 0x0125, want: true},
+		{name: "unrelated Quectel device", vendorID: 0x2c7c, productID: 0x9999, want: false},
+		{name: "unrelated USB device", vendorID: 0x1234, productID: 0x5678, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSupportedDJIUSBDevice(tt.vendorID, tt.productID); got != tt.want {
+				t.Fatalf("isSupportedDJIUSBDevice(%04x:%04x) = %v, want %v", tt.vendorID, tt.productID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDJIUSBDevicesKeepsIdenticalModulesSeparate(t *testing.T) {
+	block := func(location, iface string) string {
+		return strings.NewReplacer("LOCATION", location, "IFACE", iface).Replace(`
+    "idVendor" = 11388
+    "idProduct" = 293
+    "locationID" = LOCATION
+    "USB Product Name" = "Baiwang"
+    "USB Vendor Name" = "BAIWANG"
+    "USBSpeed" = 3
+    "bInterfaceNumber" = IFACE
+    "bInterfaceClass" = 255
+    "bInterfaceSubClass" = 0
+    "bInterfaceProtocol" = 0
+    "bNumEndpoints" = 3`)
+	}
+	raw := block("34668544", "0") + "\n\n" + block("34668544", "1") + "\n\n" + block("34734080", "0")
+
+	devices := parseDJIUSBDevices(raw)
+	if len(devices) != 2 {
+		t.Fatalf("parseDJIUSBDevices returned %d devices, want 2", len(devices))
+	}
+	if devices[0].LocationID != "0x2110000" || devices[1].LocationID != "0x2120000" {
+		t.Fatalf("unexpected locations: %q, %q", devices[0].LocationID, devices[1].LocationID)
+	}
+	if len(devices[0].Interfaces) != 2 || len(devices[1].Interfaces) != 1 {
+		t.Fatalf("interfaces were not grouped per physical module: %d, %d", len(devices[0].Interfaces), len(devices[1].Interfaces))
+	}
+}
+
+func TestParseUSBLocationID(t *testing.T) {
+	for _, value := range []string{"0x2110000", "2110000", "0X2110000"} {
+		got, err := parseUSBLocationID(value)
+		if err != nil || got != 0x02110000 {
+			t.Fatalf("parseUSBLocationID(%q) = %#x, %v", value, got, err)
+		}
+	}
+	if _, err := parseUSBLocationID("not-a-location"); err == nil {
+		t.Fatal("parseUSBLocationID accepted invalid input")
 	}
 }
 

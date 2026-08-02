@@ -73,6 +73,8 @@ type modulePhonebookEntry struct {
 }
 
 type app struct {
+	deviceSwitchMu    sync.Mutex
+	selectedUSBDevice string
 	modem             *modem.Manager
 	esimMu            sync.RWMutex
 	esim              *esim.Manager
@@ -87,6 +89,7 @@ type app struct {
 
 	smsMu          sync.RWMutex
 	sms            []receivedSMS
+	smsByDevice    map[string][]receivedSMS
 	smsSendMu      sync.Mutex
 	smsReassembler *smscodec.Reassembler
 
@@ -201,15 +204,20 @@ func main() {
 		port, err = discoverATPort()
 		if err != nil {
 			usbDevice := discoverDJIUSBDevice()
-			usbATDevice, usbATErr := openDJIUSBAT()
+			selectedUSBDevice := ""
+			if usbDevice != nil {
+				selectedUSBDevice = usbDevice.LocationID
+			}
+			usbATDevice, usbATErr := openDJIUSBAT(selectedUSBDevice)
 			instance := &app{
-				port:             "未发现 AT 串口",
-				discoveryError:   err.Error(),
-				usbDevice:        usbDevice,
-				usbAT:            usbATDevice,
-				smsPollInterval:  8 * time.Second,
-				smsAutoCleanupME: true,
-				smsReassembler:   smscodec.NewReassembler(),
+				selectedUSBDevice: selectedUSBDevice,
+				port:              "未发现 AT 串口",
+				discoveryError:    err.Error(),
+				usbDevice:         usbDevice,
+				usbAT:             usbATDevice,
+				smsPollInterval:   8 * time.Second,
+				smsAutoCleanupME:  true,
+				smsReassembler:    smscodec.NewReassembler(),
 			}
 			if usbDevice != nil {
 				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
@@ -403,6 +411,25 @@ func discoverATPort() (string, error) {
 	return "", fmt.Errorf("no AT-capable port found among %s", strings.Join(attempted, ", "))
 }
 
+type usbDeviceID struct {
+	vendorID  int
+	productID int
+}
+
+var supportedDJIUSBDeviceIDs = []usbDeviceID{
+	{vendorID: 0x2ca3, productID: 0x4006},
+	{vendorID: 0x2c7c, productID: 0x0125},
+}
+
+func isSupportedDJIUSBDevice(vendorID, productID int) bool {
+	for _, id := range supportedDJIUSBDeviceIDs {
+		if id.vendorID == vendorID && id.productID == productID {
+			return true
+		}
+	}
+	return false
+}
+
 func portScore(port string) int {
 	name := strings.ToLower(port)
 	if strings.Contains(name, "quectel") || strings.Contains(name, "dji") {
@@ -417,29 +444,35 @@ func portScore(port string) int {
 	return 0
 }
 
-func discoverDJIUSBDevice() *usbDeviceStatus {
+func discoverDJIUSBDevices() []*usbDeviceStatus {
 	out, err := exec.Command("ioreg", "-r", "-c", "IOUSBHostInterface", "-l", "-w", "0").Output()
 	if err != nil {
 		return nil
 	}
+	return parseDJIUSBDevices(string(out))
+}
 
-	var device *usbDeviceStatus
-	for _, block := range strings.Split(string(out), "\n\n") {
+func parseDJIUSBDevices(out string) []*usbDeviceStatus {
+	byLocation := make(map[string]*usbDeviceStatus)
+	for _, block := range strings.Split(out, "\n\n") {
 		vendorID, okVendor := intProperty(block, "idVendor")
 		productID, okProduct := intProperty(block, "idProduct")
-		if !okVendor || !okProduct || vendorID != 0x2ca3 {
+		if !okVendor || !okProduct || !isSupportedDJIUSBDevice(vendorID, productID) {
 			continue
 		}
+		locationID := formatHexProperty(block, "locationID")
+		device := byLocation[locationID]
 		if device == nil {
 			device = &usbDeviceStatus{
 				Product:    stringProperty(block, "USB Product Name"),
 				Vendor:     stringProperty(block, "USB Vendor Name"),
 				VendorID:   fmt.Sprintf("%04x", vendorID),
 				ProductID:  fmt.Sprintf("%04x", productID),
-				LocationID: formatHexProperty(block, "locationID"),
+				LocationID: locationID,
 				Speed:      usbSpeedName(intPropertyOrZero(block, "USBSpeed")),
 				Mode:       "vendor-specific USB mode",
 			}
+			byLocation[locationID] = device
 			if strings.TrimSpace(device.Product) == "" {
 				device.Product = "DJI 4G Module"
 			}
@@ -460,16 +493,28 @@ func discoverDJIUSBDevice() *usbDeviceStatus {
 		}
 		device.Interfaces = append(device.Interfaces, iface)
 	}
-	if device == nil {
+	devices := make([]*usbDeviceStatus, 0, len(byLocation))
+	for _, device := range byLocation {
+		sort.SliceStable(device.Interfaces, func(i, j int) bool {
+			return device.Interfaces[i].Number < device.Interfaces[j].Number
+		})
+		if allVendorSpecific(device.Interfaces) {
+			device.Mode = "vendor-specific QMI/diagnostic mode"
+		}
+		devices = append(devices, device)
+	}
+	sort.SliceStable(devices, func(i, j int) bool {
+		return devices[i].LocationID < devices[j].LocationID
+	})
+	return devices
+}
+
+func discoverDJIUSBDevice() *usbDeviceStatus {
+	devices := discoverDJIUSBDevices()
+	if len(devices) == 0 {
 		return nil
 	}
-	sort.SliceStable(device.Interfaces, func(i, j int) bool {
-		return device.Interfaces[i].Number < device.Interfaces[j].Number
-	})
-	if allVendorSpecific(device.Interfaces) {
-		device.Mode = "vendor-specific QMI/diagnostic mode"
-	}
-	return device
+	return devices[0]
 }
 
 func allVendorSpecific(interfaces []usbInterfaceStatus) bool {
@@ -607,6 +652,8 @@ func (a *app) pollSMSOnce() error {
 	if a.demo || a.modem != nil {
 		return nil
 	}
+	a.deviceSwitchMu.Lock()
+	defer a.deviceSwitchMu.Unlock()
 	if err := a.ensureUSBAT(); err != nil {
 		a.setSMSPollStatus(err)
 		return err
@@ -648,7 +695,7 @@ func (a *app) ensureUSBAT() error {
 		}
 		return errors.New("USB AT is cooling down after disconnect")
 	}
-	dev, err := openDJIUSBAT()
+	dev, err := openDJIUSBAT(a.selectedUSBDevice)
 	if err != nil {
 		return err
 	}
@@ -698,6 +745,8 @@ func (a *app) markUSBATDetached(reason string) {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.health)
+	mux.HandleFunc("GET /api/devices", a.listDevices)
+	mux.HandleFunc("POST /api/devices/select", a.selectDevice)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("GET /api/sms", a.listSMS)
 	mux.HandleFunc("GET /api/sms/status", a.smsStatus)
@@ -738,10 +787,88 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 	usbDevice := a.currentUSBDevice()
+	usbDevices := discoverDJIUSBDevices()
 	esimManager, _ := a.currentESIMManager()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "port": a.port, "esim_available": a.demo || esimManager != nil, "demo": a.demo,
-		"usb_device": usbDevice, "discovery_error": a.discoveryError,
+		"usb_device": usbDevice, "usb_devices": usbDevices, "selected_usb_device": a.selectedUSBDevice,
+		"discovery_error": a.discoveryError,
+	})
+}
+
+func (a *app) listDevices(w http.ResponseWriter, _ *http.Request) {
+	devices := discoverDJIUSBDevices()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"devices":              devices,
+		"selected_location_id": a.selectedUSBDevice,
+	})
+}
+
+func (a *app) selectDevice(w http.ResponseWriter, r *http.Request) {
+	if a.demo || a.modem != nil {
+		writeError(w, http.StatusBadRequest, "USB device selection is only available for direct USB AT mode")
+		return
+	}
+	var body struct {
+		LocationID string `json:"location_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.LocationID = strings.ToLower(strings.TrimSpace(body.LocationID))
+	var selected *usbDeviceStatus
+	for _, device := range discoverDJIUSBDevices() {
+		if strings.ToLower(device.LocationID) == body.LocationID {
+			selected = device
+			break
+		}
+	}
+	if selected == nil {
+		writeError(w, http.StatusNotFound, "requested DJI USB device is not connected")
+		return
+	}
+
+	a.deviceSwitchMu.Lock()
+	defer a.deviceSwitchMu.Unlock()
+	if a.selectedUSBDevice != selected.LocationID || a.usbAT == nil {
+		if a.usbAT != nil {
+			a.usbAT.Close()
+			a.usbAT = nil
+		}
+		a.esimMu.Lock()
+		oldESIM := a.esim
+		a.esim = nil
+		a.esimSwitchAllowed = false
+		a.esimMu.Unlock()
+		if oldESIM != nil {
+			oldESIM.NotifyModemReset()
+		}
+		a.smsMu.Lock()
+		if a.smsByDevice == nil {
+			a.smsByDevice = make(map[string][]receivedSMS)
+		}
+		if a.selectedUSBDevice != "" {
+			a.smsByDevice[a.selectedUSBDevice] = append([]receivedSMS(nil), a.sms...)
+		}
+		a.sms = append([]receivedSMS(nil), a.smsByDevice[selected.LocationID]...)
+		a.smsLastPoll = time.Time{}
+		a.smsLastPollError = ""
+		a.smsReassembler = smscodec.NewReassembler()
+		a.smsMu.Unlock()
+		a.selectedUSBDevice = selected.LocationID
+		a.usbDevice = selected
+		a.usbATBackoffUntil = time.Time{}
+		a.usbATBackoffErr = ""
+		if err := a.ensureUSBAT(); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		log.Printf("selected DJI USB device %s", selected.LocationID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"selected_location_id": a.selectedUSBDevice,
+		"device":               selected,
+		"port":                 a.port,
 	})
 }
 
@@ -767,6 +894,8 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	if a.modem == nil {
+		a.deviceSwitchMu.Lock()
+		defer a.deviceSwitchMu.Unlock()
 		// A libusb handle may survive a physical unplug. Refresh the macOS USB
 		// inventory before using it so the UI never reports a stale connection.
 		if a.usbAT != nil && a.currentUSBDevice() == nil {
@@ -811,10 +940,19 @@ func (a *app) currentUSBDevice() *usbDeviceStatus {
 	if a.modem != nil || a.demo {
 		return a.usbDevice
 	}
-	usbDevice := discoverDJIUSBDevice()
+	devices := discoverDJIUSBDevices()
+	if a.selectedUSBDevice == "" && len(devices) > 0 {
+		a.selectedUSBDevice = devices[0].LocationID
+	}
+	for _, device := range devices {
+		if device.LocationID == a.selectedUSBDevice {
+			a.usbDevice = device
+			return device
+		}
+	}
 	// Never retain the last successful scan: that is stale after an unplug.
-	a.usbDevice = usbDevice
-	return usbDevice
+	a.usbDevice = nil
+	return nil
 }
 
 func (a *app) usbATStatus() (modem.DeviceStatus, error) {
@@ -1230,6 +1368,8 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 		return response, nil
 	}
 	if a.modem == nil {
+		a.deviceSwitchMu.Lock()
+		defer a.deviceSwitchMu.Unlock()
 		if err := a.ensureUSBAT(); err != nil {
 			return "", err
 		}
