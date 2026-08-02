@@ -5,6 +5,7 @@ let esimHealthInFlight = false;
 let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
+let deviceSwitchInFlight = false;
 
 function setThemePreference(theme) {
   if (theme === "light" || theme === "dark") {
@@ -62,6 +63,53 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
+}
+
+async function loadDevices() {
+  if (deviceSwitchInFlight) return;
+  try {
+    const result = await api("/api/devices");
+    const devices = Array.isArray(result.devices) ? result.devices : [];
+    const picker = $("#device-picker");
+    const select = $("#device-select");
+    picker.hidden = devices.length < 2;
+    const options = devices.map((device, index) => {
+      const option = document.createElement("option");
+      option.value = device.location_id;
+      option.textContent = `模块 ${index + 1} · ${device.location_id}`;
+      option.selected = device.location_id === result.selected_location_id;
+      return option;
+    });
+    select.replaceChildren(...options);
+  } catch (error) {
+    $("#device-picker").hidden = true;
+  }
+}
+
+async function selectDevice(locationID) {
+  const select = $("#device-select");
+  deviceSwitchInFlight = true;
+  select.disabled = true;
+  try {
+    await api("/api/devices/select", {
+      method: "POST",
+      body: JSON.stringify({ location_id: locationID }),
+    });
+    lastSMSCount = null;
+    networkTrafficPrevious = null;
+    $("#at-output").textContent = "已切换模块，等待命令";
+    await Promise.all([loadStatus(), loadSMS()]);
+    const activeView = document.querySelector(".view.active")?.id;
+    if (activeView === "esim") await loadESIM();
+    if (activeView === "network") await loadNetwork();
+    notice(`已切换到 ${select.selectedOptions[0]?.textContent || locationID}`);
+  } catch (error) {
+    notice(`切换失败：${error.message}`);
+  } finally {
+    deviceSwitchInFlight = false;
+    select.disabled = false;
+    await loadDevices();
+  }
 }
 
 function notice(message) {
@@ -1044,7 +1092,7 @@ $("#at-form").addEventListener("submit", async (event) => {
 });
 
 $("#refresh").addEventListener("click", async () => {
-  await Promise.all([loadStatus(), loadSMS()]);
+  await Promise.all([loadDevices(), loadStatus(), loadSMS()]);
   notice("状态已刷新");
 });
 $("#refresh-sms").addEventListener("click", async () => {
@@ -1102,9 +1150,12 @@ $("#usbnet-mode-1").addEventListener("click", () => setUSBNetMode(1));
 $("#usbnet-mode-2").addEventListener("click", () => setUSBNetMode(2));
 $("#usbnet-mode-3").addEventListener("click", () => setUSBNetMode(3));
 $("#reboot-module").addEventListener("click", rebootModule);
+$("#device-select").addEventListener("change", (event) => selectDevice(event.currentTarget.value));
 
+loadDevices();
 loadStatus();
 loadSMS();
 setNetworkTrafficPolling(true);
 setInterval(loadStatus, 10000);
 setInterval(loadSMS, 5000);
+setInterval(loadDevices, 5000);
