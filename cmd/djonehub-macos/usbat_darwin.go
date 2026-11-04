@@ -195,7 +195,7 @@ func (u *usbAT) Command(cmd string, timeout time.Duration) (string, error) {
 		}
 	}
 	if len(chunks) == 0 {
-		return "", errors.New("USB AT command timed out without response")
+		return "", errUSBATNoResponse
 	}
 	return normalizeATResponse(strings.Join(chunks, "")), nil
 }
@@ -311,7 +311,7 @@ func (u *usbAT) bulkWriteLocked(endpoint byte, payload []byte, timeout time.Dura
 		C.uint(timeout.Milliseconds()),
 	)
 	if rc != 0 {
-		return fmt.Errorf("USB bulk write: %s", usbErrorName(rc))
+		return &usbError{Op: "USB bulk write", Code: int(rc), Name: usbErrorName(rc)}
 	}
 	if int(transferred) != len(payload) {
 		return fmt.Errorf("USB bulk write short transfer: %d/%d", int(transferred), len(payload))
@@ -334,7 +334,7 @@ func (u *usbAT) bulkReadLocked(endpoint byte, timeout time.Duration) ([]byte, er
 		return nil, errUSBTimeout
 	}
 	if rc != 0 {
-		return nil, fmt.Errorf("USB bulk read: %s", usbErrorName(rc))
+		return nil, &usbError{Op: "USB bulk read", Code: int(rc), Name: usbErrorName(rc)}
 	}
 	return buf[:int(transferred)], nil
 }

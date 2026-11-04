@@ -499,6 +499,60 @@ function setESIMHealthPolling(enabled) {
   }, 30000);
 }
 
+function wakeRecoveryLabel(action) {
+  switch (action) {
+    case "none": return "无需处理";
+    case "reset": return "已重启模块";
+    case "skipped": return "已跳过";
+    case "deferred": return "等待开盖";
+    case "failed": return "未恢复";
+    default: return "待命";
+  }
+}
+
+function wakeRecoveryDetail(recovery) {
+  if (recovery.forced_off) return "已通过启动参数 -wake-recovery=false 关闭；去掉该参数并重启 DJOneHub 后才能在这里开启";
+  if (!recovery.enabled) return "已关闭：合盖唤醒后不会检查上网网卡，也不会重启模块";
+  return recovery.detail || "合盖唤醒后，若上网模式的 USB 网卡没有回来，会自动重启模块";
+}
+
+function wakeRecoveryCard(recovery) {
+  const card = diagnosticCard(
+    "唤醒恢复",
+    recovery.enabled ? wakeRecoveryLabel(recovery.action) : "已关闭",
+    wakeRecoveryDetail(recovery),
+  );
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "switch";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", String(Boolean(recovery.enabled)));
+  toggle.setAttribute("aria-label", "合盖唤醒后自动恢复上网网卡");
+  toggle.title = recovery.forced_off ? "已通过启动参数关闭" : (recovery.enabled ? "点击关闭" : "点击开启");
+  toggle.disabled = Boolean(recovery.forced_off);
+  toggle.addEventListener("click", () => setWakeRecoveryEnabled(card, toggle, !recovery.enabled));
+  const head = document.createElement("div");
+  head.className = "diagnostic-card-head";
+  head.append(card.firstElementChild, toggle);
+  card.prepend(head);
+  return card;
+}
+
+async function setWakeRecoveryEnabled(card, toggle, enabled) {
+  toggle.disabled = true;
+  try {
+    const recovery = await api("/api/network/wake-recovery", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+    card.replaceWith(wakeRecoveryCard(recovery));
+    notice(enabled ? "已开启唤醒恢复" : "已关闭唤醒恢复");
+  } catch (error) {
+    toggle.disabled = false;
+    notice(error.message);
+  }
+}
+
 function diagnosticCard(label, value, detail = "") {
   const card = document.createElement("div");
   card.className = "diagnostic-card";
@@ -566,6 +620,7 @@ async function loadNetwork() {
       : "未知";
     grid.replaceChildren(
       diagnosticCard("USB 网卡", diag.usb_network_present ? "已识别" : "未识别", "macOS 是否出现可用 USB 网络接口"),
+      wakeRecoveryCard(diag.wake_recovery || {}),
       diagnosticCard("默认出口", routeText, "当前 macOS 实际优先使用的网卡和网关"),
       diagnosticCard("usbnet", diag.usbnet_mode || "未知", "模块当前 USB 网络模式"),
       diagnosticCard("蜂窝数据", active ? `已激活 ${active}` : "未激活", "PDP context 激活状态"),
