@@ -78,7 +78,8 @@ type app struct {
 	esim              *esim.Manager
 	esimSwitchAllowed bool
 	demo              bool
-	// wakeRecoveryForcedOff is set by -wake-recovery=false.
+	// wakeRecoveryForcedOff is set by -wake-recovery=false. It overrides
+	// the setting on the web page for this run.
 	wakeRecoveryForcedOff bool
 
 	// usbMu guards the USB AT bridge and the discovery state below. HTTP
@@ -124,6 +125,10 @@ type app struct {
 
 	smsPollLog  errorLog
 	usbRetryLog errorLog
+
+	settingsMu   sync.Mutex
+	settings     appSettings
+	settingsPath string // empty in demo mode: settings stay in memory
 }
 
 type usbInterfaceStatus struct {
@@ -154,7 +159,7 @@ type networkDiagnostic struct {
 	MacInterfaces     []macNetInterface  `json:"mac_interfaces"`
 	DefaultRoute      macDefaultRoute    `json:"default_route"`
 	USBNetworkPresent bool               `json:"usb_network_present"`
-	WakeRecovery      wakeRecoveryResult `json:"wake_recovery,omitzero"`
+	WakeRecovery      wakeRecoveryStatus `json:"wake_recovery"`
 	USBDevice         *usbDeviceStatus   `json:"usb_device,omitempty"`
 	Raw               map[string]string  `json:"raw,omitempty"`
 	Errors            map[string]string  `json:"errors,omitempty"`
@@ -209,11 +214,12 @@ func main() {
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
 	flag.StringVar(&listen, "listen", "127.0.0.1:7575", "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
-	flag.BoolVar(&wakeRecovery, "wake-recovery", true, "restore the USB internet link after the Mac wakes; may reboot the module with AT+CFUN=1,1")
+	flag.BoolVar(&wakeRecovery, "wake-recovery", true, "restore the USB internet link after the Mac wakes; may reboot the module with AT+CFUN=1,1. False turns it off for this run, whatever the web page setting")
 	flag.Parse()
 
 	if demo {
 		instance := newDemoApp()
+		instance.wakeRecoveryForcedOff = !wakeRecovery
 		log.Printf("DJOneHub demo mode")
 		serve(instance, listen)
 		return
@@ -236,6 +242,7 @@ func main() {
 
 				wakeRecoveryForcedOff: !wakeRecovery,
 			}
+			instance.initSettings()
 			if usbDevice != nil {
 				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
 					usbDevice.Vendor, usbDevice.Product, usbDevice.VendorID, usbDevice.ProductID)
@@ -282,6 +289,7 @@ func main() {
 
 		wakeRecoveryForcedOff: !wakeRecovery,
 	}
+	instance.initSettings()
 	manager.SetSMSCallback(instance.recordSMS)
 	if err := manager.Start(); err != nil {
 		log.Fatalf("open modem on %s: %v", port, err)
@@ -363,7 +371,7 @@ func serve(instance *app, listen string) {
 		port, _ := instance.portStatus()
 		log.Printf("DJOneHub is using %s", port)
 		if instance.wakeRecoveryForcedOff {
-			log.Printf("wake recovery: turned off by -wake-recovery=false")
+			log.Printf("wake recovery: turned off by -wake-recovery=false; the web page switch has no effect for this run")
 		} else {
 			startWakeMonitor(ctx, instance)
 		}
@@ -846,6 +854,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/network/check-proxy", a.checkProxyRoute)
 	mux.HandleFunc("POST /api/network/usbnet", a.setUSBNetMode)
 	mux.HandleFunc("POST /api/network/reboot-module", a.rebootModule)
+	mux.HandleFunc("PUT /api/network/wake-recovery", a.updateWakeRecoverySetting)
 	mux.HandleFunc("GET /api/esim", a.esimOverview)
 	mux.HandleFunc("GET /api/esim/notes", a.listESIMNotes)
 	mux.HandleFunc("PUT /api/esim/notes", a.saveESIMNote)
@@ -1519,7 +1528,7 @@ func (a *app) networkDiagnostic(w http.ResponseWriter, _ *http.Request) {
 		Errors:        errs,
 	}
 	diag.USBNetworkPresent = hasLikelyUSBNetworkInterface(diag.MacInterfaces)
-	diag.WakeRecovery = a.wakeRecoverySnapshot()
+	diag.WakeRecovery = a.wakeRecoveryStatus()
 
 	commands := map[string]string{
 		"usbnet":  `AT+QCFG="usbnet"`,

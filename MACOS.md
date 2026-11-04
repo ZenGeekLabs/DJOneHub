@@ -125,7 +125,11 @@ runs recovery immediately. A manual run ignores the lid state and the attempt
 limit, so it also works in clamshell mode. `./djonehub start` runs the service
 in the background, so this needs the executable started directly.
 
-To turn the feature off, start the executable with `-wake-recovery=false`.
+The switch on the 唤醒恢复 card turns the feature off and on. The choice is
+saved in `~/Library/Application Support/DJOneHub/settings.json`, so it holds
+while the page is closed and across restarts. Starting the executable with
+`-wake-recovery=false` turns the feature off for that run, whatever the switch
+says.
 
 ## Platform limitations
 

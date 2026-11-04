@@ -59,28 +59,50 @@ func (m *wakeMonitor) run(ctx context.Context) {
 		logRecovery("disabled, cannot read the system wake time: %v", err)
 		return
 	}
-	lastText := "no sleep since boot"
-	if !last.IsZero() {
-		lastText = "last wake " + last.Local().Format(time.RFC3339)
+	on := m.app.wakeRecoveryEnabled()
+	if on {
+		lastText := "no sleep since boot"
+		if !last.IsZero() {
+			lastText = "last wake " + last.Local().Format(time.RFC3339)
+		}
+		enterText := ""
+		if m.interactive() {
+			enterText = " Press Enter in this terminal to retry at any time."
+		}
+		logRecovery("armed (%s). Checking the internet link in %s and after every wake.%s", lastText, durationText(wakeMonitorStartDelay), enterText)
+	} else {
+		logRecovery("turned off on the web page. Turning it back on in the Network tab checks the internet link right away.")
 	}
-	enterText := ""
-	if m.interactive() {
-		enterText = " Press Enter in this terminal to retry at any time."
-	}
-	logRecovery("armed (%s). Checking the internet link in %s and after every wake.%s", lastText, durationText(wakeMonitorStartDelay), enterText)
 	if !sleepCtx(ctx, wakeMonitorStartDelay) {
 		return
 	}
-	state := wakeMonitorState{LastWake: last, Pending: true, Reason: reasonStartup}
+	state := wakeMonitorState{LastWake: last, Pending: on, Reason: reasonStartup}
 	ticker := time.NewTicker(wakeMonitorTick)
 	defer ticker.Stop()
 	for {
-		state = m.advance(ctx, state)
+		if enabled := m.app.wakeRecoveryEnabled(); enabled != on {
+			on = enabled
+			if on {
+				wake, _ := readSystemWakeTime() // zero on error; resumeRecovery then keeps LastWake
+				state = resumeRecovery(state, wake)
+				logRecovery("turned on from the web page; checking the internet link now")
+			} else {
+				state = pauseRecovery(state)
+				logRecovery("turned off from the web page; wakes no longer check the internet link or reboot the module")
+			}
+		}
+		if on {
+			state = m.advance(ctx, state)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		case <-m.enter:
+			if !on {
+				logRecovery("turned off on the web page, so Enter does nothing; turn it on in the Network tab first")
+				continue
+			}
 			logRecovery("Enter pressed; retrying now (a manual retry ignores the lid state and the attempt limit)")
 			state = requestManualRecovery(state)
 		}
@@ -195,6 +217,7 @@ func (m *wakeMonitor) watchEnterKey() <-chan struct{} {
 // manual run skips the lid check: the user is typing, so the Mac is awake.
 func (a *app) recoverInternetLink(ctx context.Context, reason recoveryReason) wakeRecoveryResult {
 	result := runInternetRecovery(reason, defaultRecoveryPolicy(), internetRecoveryDeps{
+		Enabled:    a.wakeRecoveryEnabled,
 		QueryMode:  a.readUSBNetMode,
 		Observe:    func() (dongleLink, error) { return discoverDongleLink(ctx) },
 		LockModule: a.tryLockModule,

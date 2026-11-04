@@ -83,6 +83,23 @@ func requestManualRecovery(state wakeMonitorState) wakeMonitorState {
 	return state
 }
 
+// pauseRecovery drops everything queued while the feature is turned off.
+func pauseRecovery(state wakeMonitorState) wakeMonitorState {
+	return wakeMonitorState{LastWake: state.LastWake}
+}
+
+// resumeRecovery queues a check right after the feature is turned back on.
+// Wakes that happened while it was off are covered by that check.
+func resumeRecovery(state wakeMonitorState, wake time.Time) wakeMonitorState {
+	if wake.After(state.LastWake) {
+		state.LastWake = wake
+	}
+	state.Pending = true
+	state.Reason = reasonEnabled
+	state.Attempts = 0
+	return state
+}
+
 // needsLid reports whether a tick has to read the lid state. With nothing
 // pending or scheduled, only a waketime change matters.
 func (s wakeMonitorState) needsLid(sig wakeSignal) bool {
@@ -236,6 +253,8 @@ func reasonLabel(reason recoveryReason) string {
 		return "startup check"
 	case reasonManual:
 		return "manual retry"
+	case reasonEnabled:
+		return "turned on"
 	default:
 		return string(reason)
 	}

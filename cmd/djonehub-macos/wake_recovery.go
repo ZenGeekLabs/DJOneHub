@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ const (
 	reasonWake    recoveryReason = "wake"
 	reasonRetry   recoveryReason = "retry"
 	reasonManual  recoveryReason = "manual"
+	reasonEnabled recoveryReason = "enabled"
 )
 
 // recoveryOutcome is the "action" field of the web API. app.js labels each value.
@@ -134,6 +136,9 @@ func defaultRecoveryPolicy() recoveryPolicy {
 }
 
 type internetRecoveryDeps struct {
+	// Enabled is checked right before AT+CFUN, so turning the feature off on
+	// the web page stops a run that has not reset the module yet. Nil means on.
+	Enabled   func() bool
 	QueryMode func() (int, error)
 	Observe   func() (dongleLink, error)
 	// LockModule takes the module for AT+CFUN=1,1 without waiting. It fails
@@ -227,6 +232,10 @@ func runInternetRecovery(reason recoveryReason, policy recoveryPolicy, deps inte
 // holds the module lock for this window, so a queued SMS or eSIM request
 // waits for the module instead of running into the reboot.
 func sendReset(result wakeRecoveryResult, policy recoveryPolicy, deps internetRecoveryDeps, link dongleLink) (wakeRecoveryResult, bool) {
+	if deps.Enabled != nil && !deps.Enabled() {
+		return result.with(outcomeSkipped, followNone,
+			note{zh: "唤醒恢复已在网页上关闭，没有重启模块", en: "turned off on the web page; the module was not rebooted"}), false
+	}
 	if deps.AllowReset != nil && !deps.AllowReset() {
 		return result.with(outcomeDeferred, followNone,
 			note{zh: "合盖休眠中，等开盖后再恢复上网网卡", en: "the lid is closed; recovery continues once it opens"}), false
@@ -369,6 +378,70 @@ func (a *app) wakeRecoverySnapshot() wakeRecoveryResult {
 	a.recoveryMu.Lock()
 	defer a.recoveryMu.Unlock()
 	return a.recoveryResult
+}
+
+// wakeRecoveryStatus is the "wake_recovery" object of GET /api/network: the
+// switch on the web page plus the last result.
+type wakeRecoveryStatus struct {
+	Enabled bool `json:"enabled"`
+	// ForcedOff means -wake-recovery=false, which the page cannot override.
+	ForcedOff bool `json:"forced_off,omitempty"`
+	wakeRecoveryResult
+}
+
+func (a *app) wakeRecoveryStatus() wakeRecoveryStatus {
+	return wakeRecoveryStatus{
+		Enabled:            a.wakeRecoveryEnabled(),
+		ForcedOff:          a.wakeRecoveryForcedOff,
+		wakeRecoveryResult: a.wakeRecoverySnapshot(),
+	}
+}
+
+func (a *app) wakeRecoveryEnabled() bool {
+	if a.wakeRecoveryForcedOff {
+		return false
+	}
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	return a.settings.wakeRecoveryOn()
+}
+
+func (a *app) setWakeRecoveryEnabled(on bool) error {
+	a.settingsMu.Lock()
+	defer a.settingsMu.Unlock()
+	next := a.settings
+	next.WakeRecovery = &on
+	if a.settingsPath != "" {
+		if err := saveSettings(a.settingsPath, next); err != nil {
+			return err
+		}
+	}
+	a.settings = next
+	return nil
+}
+
+// updateWakeRecoverySetting handles PUT /api/network/wake-recovery. The wake
+// monitor picks the change up on its next tick.
+func (a *app) updateWakeRecoverySetting(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+	if a.wakeRecoveryForcedOff {
+		writeError(w, http.StatusConflict, "唤醒恢复已通过启动参数 -wake-recovery=false 关闭；去掉该参数并重启 DJOneHub 后才能在网页上开启")
+		return
+	}
+	if err := a.setWakeRecoveryEnabled(*body.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存设置失败："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, a.wakeRecoveryStatus())
 }
 
 type hardwarePort struct {
