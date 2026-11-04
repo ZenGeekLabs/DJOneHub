@@ -665,16 +665,9 @@ func (a *app) ensureUSBAT() error {
 }
 
 func (a *app) resetUSBATIfGone(err error) {
-	if err == nil || a.usbAT == nil {
-		return
+	if usbATDropped(err) && a.usbAT != nil {
+		a.markUSBATDetached(err.Error())
 	}
-	text := strings.ToUpper(err.Error())
-	if !strings.Contains(text, "NO_DEVICE") &&
-		!strings.Contains(text, "NOT_FOUND") &&
-		!strings.Contains(text, "USB AT COMMAND TIMED OUT") {
-		return
-	}
-	a.markUSBATDetached(err.Error())
 }
 
 // markUSBATDetached clears state belonging to a physically removed module.
@@ -994,6 +987,10 @@ func (a *app) readUSBATSMS() ([]receivedSMS, error) {
 	var errs []string
 	for _, memory := range memories {
 		items, err := a.readUSBATSMSFromMemory(memory)
+		if usbATDropped(err) {
+			// The handle is gone; the next storage would only time out too.
+			return nil, fmt.Errorf("%s: %w", memory, err)
+		}
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", memory, err))
 			continue
