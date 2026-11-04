@@ -108,6 +108,9 @@ type app struct {
 
 	trafficMu        sync.Mutex
 	trafficBaselines map[string]networkByteCounters
+
+	smsPollLog  errorLog
+	usbRetryLog errorLog
 }
 
 type usbInterfaceStatus struct {
@@ -600,9 +603,7 @@ func (a *app) startSMSPoller(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if err := a.pollSMSOnce(); err != nil {
-				log.Printf("SMS poll failed: %v", err)
-			}
+			a.smsPollLog.report("SMS poll failed", a.pollSMSOnce())
 			timer.Reset(interval)
 		}
 	}
@@ -637,6 +638,26 @@ func (a *app) pollSMSOnce() error {
 		log.Printf("SMS poll cached %d new message(s), total %d", newCount, total)
 	}
 	return nil
+}
+
+// errorLog logs a recurring error once instead of on every poll. It logs again
+// when the message changes or after a success clears it.
+type errorLog struct {
+	mu   sync.Mutex
+	last string
+}
+
+func (l *errorLog) report(prefix string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err == nil {
+		l.last = ""
+		return
+	}
+	if msg := err.Error(); msg != l.last {
+		l.last = msg
+		log.Printf("%s: %s", prefix, msg)
+	}
 }
 
 // currentUSBAT returns the open USB AT bridge, or nil. Use the returned
@@ -809,9 +830,7 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 			a.markUSBATDetached("DJI USB device disconnected")
 		}
 		dev, err := a.ensureUSBAT()
-		if err != nil {
-			log.Printf("USB AT retry failed: %v", err)
-		}
+		a.usbRetryLog.report("USB AT retry failed", err)
 		if dev != nil {
 			status, err := a.usbATStatus(dev)
 			if err == nil {
