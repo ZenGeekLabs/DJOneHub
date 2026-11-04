@@ -499,6 +499,17 @@ function setESIMHealthPolling(enabled) {
   }, 30000);
 }
 
+function wakeRecoveryLabel(action) {
+  switch (action) {
+    case "none": return "无需处理";
+    case "reset": return "已重启模块";
+    case "skipped": return "已跳过";
+    case "deferred": return "等待开盖";
+    case "failed": return "未恢复";
+    default: return "待命";
+  }
+}
+
 function diagnosticCard(label, value, detail = "") {
   const card = document.createElement("div");
   card.className = "diagnostic-card";
@@ -564,8 +575,14 @@ async function loadNetwork() {
     const routeText = route.interface
       ? `${route.interface}${route.gateway ? ` -> ${route.gateway}` : ""}`
       : "未知";
+    const recovery = diag.wake_recovery || {};
     grid.replaceChildren(
       diagnosticCard("USB 网卡", diag.usb_network_present ? "已识别" : "未识别", "macOS 是否出现可用 USB 网络接口"),
+      diagnosticCard(
+        "唤醒恢复",
+        wakeRecoveryLabel(recovery.action),
+        recovery.detail || "合盖唤醒后，若上网模式的 USB 网卡没有回来，会自动重启模块",
+      ),
       diagnosticCard("默认出口", routeText, "当前 macOS 实际优先使用的网卡和网关"),
       diagnosticCard("usbnet", diag.usbnet_mode || "未知", "模块当前 USB 网络模式"),
       diagnosticCard("蜂窝数据", active ? `已激活 ${active}` : "未激活", "PDP context 激活状态"),

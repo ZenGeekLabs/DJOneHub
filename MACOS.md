@@ -94,6 +94,39 @@ SIM, send messages or switch a physical eSIM profile.
 
 Logs are written to `~/Library/Logs/DJOneHub`.
 
+## Internet link after sleep
+
+With usbnet set to 1 (the module's CDC-ECM internet mode), macOS can lose the
+dongle's network interface after the Mac sleeps: the `Baiwang` service and its
+`192.168.225.x` address disappear. DJOneHub checks the interface at startup and
+after every wake. If the interface is missing or has no address, it reboots the
+module with `AT+CFUN=1,1` and waits for the interface to return.
+
+- It never changes the usbnet setting and does nothing in other usbnet modes.
+- It does not reboot the module while the lid is closed. A USB dark wake with
+  the lid closed waits until the lid opens. Clamshell mode with an external
+  display also counts as a closed lid; see manual retry below.
+- It does not reboot the module while an SMS, usbnet switch, module reboot or
+  eSIM request is running, and those requests wait while the module reboots.
+- `192.0.0.2` is a placeholder macOS assigns before the module's DHCP reply.
+  DJOneHub waits for the real address instead of rebooting.
+- If the interface still does not come back, DJOneHub tries again: 3 minutes
+  after a reboot, or 30 seconds after a check the module was too busy for. It
+  makes at most 10 attempts per wake, then stops and reports it.
+
+The latest result appears on the 唤醒恢复 card of the network diagnostics page.
+The log explains each step, how long it waits and when it retries; recovery
+lines start with `wake recovery:` and lines about the reboot it triggers start
+with `module reboot:`. While that reboot is in progress, the expected SMS poll
+and status errors are not logged.
+
+When the executable runs in the foreground of a terminal, pressing Enter there
+runs recovery immediately. A manual run ignores the lid state and the attempt
+limit, so it also works in clamshell mode. `./djonehub start` runs the service
+in the background, so this needs the executable started directly.
+
+To turn the feature off, start the executable with `-wake-recovery=false`.
+
 ## Platform limitations
 
 - Native QMI/MBIM control, Linux udev and network-namespace orchestration are
