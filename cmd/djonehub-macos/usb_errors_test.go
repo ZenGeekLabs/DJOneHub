@@ -33,7 +33,7 @@ func TestUSBErrorClassification(t *testing.T) {
 
 	a := &app{usbAT: &usbAT{}}
 	a.resetUSBATIfGone(other)
-	if a.usbAT != nil {
+	if a.currentUSBAT() != nil {
 		t.Fatal("LIBUSB_ERROR_OTHER should detach the AT bridge")
 	}
 }
