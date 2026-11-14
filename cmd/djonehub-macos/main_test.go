@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestPortScore(t *testing.T) {
 	tests := []struct {
@@ -64,6 +68,67 @@ func TestParseUSBATOperator(t *testing.T) {
 				t.Fatalf("parseUSBATOperator(%q) = %q, want %q", tt.response, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseUSBATIMS(t *testing.T) {
+	configured, available, ok := parseUSBATIMS("AT+QCFG=\"ims\"\r\n+QCFG: \"ims\",1,1\r\nOK")
+	if !ok || configured != 1 || available != 1 {
+		t.Fatalf("parseUSBATIMS() = (%d, %d, %v), want (1, 1, true)", configured, available, ok)
+	}
+	if _, _, ok := parseUSBATIMS("ERROR"); ok {
+		t.Fatal("parseUSBATIMS(ERROR) unexpectedly succeeded")
+	}
+}
+
+func TestShouldRestoreAutomaticOperator(t *testing.T) {
+	tests := []struct {
+		name          string
+		previousICCID string
+		currentICCID  string
+		operatorReply string
+		want          bool
+	}{
+		{
+			name:          "SIM changed while manually selected",
+			previousICCID: "old-card",
+			currentICCID:  "new-card",
+			operatorReply: `+COPS: 1,0,"CHN-CT",7`,
+			want:          true,
+		},
+		{
+			name:          "SIM changed while automatic",
+			previousICCID: "old-card",
+			currentICCID:  "new-card",
+			operatorReply: `+COPS: 0,0,"CHN-CT",7`,
+			want:          false,
+		},
+		{
+			name:          "same SIM remains manual",
+			previousICCID: "same-card",
+			currentICCID:  "same-card",
+			operatorReply: `+COPS: 1,0,"CHN-CT",7`,
+			want:          false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRestoreAutomaticOperator(tt.previousICCID, tt.currentICCID, tt.operatorReply); got != tt.want {
+				t.Fatalf("shouldRestoreAutomaticOperator() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnableIMS(t *testing.T) {
+	instance := &app{demo: true}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/network/enable-ims", nil)
+
+	instance.enableIMS(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("enableIMS status = %d, want %d; body=%s", recorder.Code, http.StatusAccepted, recorder.Body.String())
 	}
 }
 

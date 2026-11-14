@@ -39,6 +39,7 @@
       <div><span>信号</span><strong id="signal">--</strong></div>
       <div><span>网络</span><strong id="network-mode">--</strong></div>
       <div><span>SIM</span><strong id="sim">--</strong></div>
+      <div><span>IMS</span><strong id="ims">--</strong></div>
       <div><span>工作模式</span><strong id="work-mode">--</strong></div>
       <div><span>当前下载</span><strong id="traffic-rx-rate">--</strong></div>
       <div><span>当前上传</span><strong id="traffic-tx-rate">--</strong></div>
@@ -148,6 +149,13 @@
 
     <section id="at" class="view">
       <div class="view-intro"><div><span class="section-kicker">ADVANCED DIAGNOSTICS</span><h2>AT 调试</h2></div><p>直接向模块发送 AT 指令。</p></div>
+      <div class="section-heading">
+        <div>
+          <h2>IMS / 漫游短信</h2>
+          <p id="ims-status" class="inline-status">部分漫游 SIM 需要 IMS 才能在 LTE 网络收发短信。</p>
+        </div>
+        <button id="enable-ims" class="secondary" type="button">启用 IMS 并重启</button>
+      </div>
       <form id="at-form" class="toolbar">
         <input id="at-command" type="text" value="AT+CSQ" spellcheck="false" required>
         <button type="submit">执行</button>

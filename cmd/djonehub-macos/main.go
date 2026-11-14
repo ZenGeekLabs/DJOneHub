@@ -84,6 +84,8 @@ type app struct {
 	usbDevice         *usbDeviceStatus
 	usbATBackoffUntil time.Time
 	usbATBackoffErr   string
+	simIdentityMu     sync.Mutex
+	lastSIMICCID      string
 
 	smsMu          sync.RWMutex
 	sms            []receivedSMS
@@ -710,6 +712,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/network/check-4g", a.check4GRoute)
 	mux.HandleFunc("POST /api/network/check-proxy", a.checkProxyRoute)
 	mux.HandleFunc("POST /api/network/usbnet", a.setUSBNetMode)
+	mux.HandleFunc("POST /api/network/enable-ims", a.enableIMS)
 	mux.HandleFunc("POST /api/network/reboot-module", a.rebootModule)
 	mux.HandleFunc("GET /api/esim", a.esimOverview)
 	mux.HandleFunc("GET /api/esim/notes", a.listESIMNotes)
@@ -829,6 +832,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 	cimiResp, _ := a.usbAT.Command("AT+CIMI", 3*time.Second)
 	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 3*time.Second)
 	usbnetResp, _ := a.usbAT.Command(`AT+QCFG="usbnet"`, 3*time.Second)
+	imsResp, _ := a.usbAT.Command(`AT+QCFG="ims"`, 3*time.Second)
 
 	if cpinErr != nil {
 		return modem.DeviceStatus{}, cpinErr
@@ -854,7 +858,9 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		RadioBand:     band,
 		RadioChannel:  channel,
 		USBNetMode:    usbnetMode,
+		IMSStatus:     parseUSBATIMSStatus(imsResp),
 	}
+	a.restoreAutomaticOperatorAfterSIMChange(status.ICCID, copsResp)
 	if status.Operator == "" && strings.Contains(copsResp, "CHN-UNICOM") {
 		status.Operator = "CHN-UNICOM"
 	}
@@ -929,6 +935,71 @@ func parseUSBATOperator(resp string) string {
 		return ""
 	}
 	return modem.ResolveServingOperatorNameFromPLMN(match[1])
+}
+
+func parseUSBATOperatorMode(resp string) (int, bool) {
+	re := regexp.MustCompile(`\+COPS:\s*(\d+)`)
+	match := re.FindStringSubmatch(resp)
+	if len(match) != 2 {
+		return 0, false
+	}
+	mode, err := strconv.Atoi(match[1])
+	return mode, err == nil
+}
+
+func parseUSBATIMS(resp string) (configured int, available int, ok bool) {
+	re := regexp.MustCompile(`\+QCFG:\s*"ims"\s*,\s*(\d+)\s*,\s*(\d+)`)
+	match := re.FindStringSubmatch(resp)
+	if len(match) != 3 {
+		return 0, 0, false
+	}
+	configured, configuredErr := strconv.Atoi(match[1])
+	available, availableErr := strconv.Atoi(match[2])
+	return configured, available, configuredErr == nil && availableErr == nil
+}
+
+func parseUSBATIMSStatus(resp string) int {
+	_, available, ok := parseUSBATIMS(resp)
+	if !ok {
+		return 0
+	}
+	return available
+}
+
+func shouldRestoreAutomaticOperator(previousICCID, currentICCID, copsResp string) bool {
+	previousICCID = strings.TrimSpace(previousICCID)
+	currentICCID = strings.TrimSpace(currentICCID)
+	if previousICCID == "" || currentICCID == "" || previousICCID == currentICCID {
+		return false
+	}
+	mode, ok := parseUSBATOperatorMode(copsResp)
+	return ok && mode == 1
+}
+
+func (a *app) restoreAutomaticOperatorAfterSIMChange(currentICCID, copsResp string) {
+	currentICCID = strings.TrimSpace(currentICCID)
+	if currentICCID == "" || a.demo || a.modem != nil || a.usbAT == nil {
+		return
+	}
+
+	a.simIdentityMu.Lock()
+	defer a.simIdentityMu.Unlock()
+	if a.lastSIMICCID == "" {
+		a.lastSIMICCID = currentICCID
+		return
+	}
+	if a.lastSIMICCID == currentICCID {
+		return
+	}
+	if shouldRestoreAutomaticOperator(a.lastSIMICCID, currentICCID, copsResp) {
+		response, err := a.usbAT.Command("AT+COPS=0", 30*time.Second)
+		if err != nil || !atProbeSucceeded(response) {
+			log.Printf("SIM changed while operator selection was manual; restore automatic selection failed: %v %s", err, response)
+			return
+		}
+		log.Printf("SIM changed while operator selection was manual; restored automatic operator selection")
+	}
+	a.lastSIMICCID = currentICCID
 }
 
 func firstNonZeroRegistration(responses ...string) int {
@@ -1217,6 +1288,7 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 			"AT+CSQ":             "+CSQ: 22,99\r\nOK",
 			"AT+COPS?":           "+COPS: 0,0,\"China Mobile\",7\r\nOK",
 			"AT+QNWINFO":         "+QNWINFO: \"FDD LTE\",\"46000\",\"LTE BAND 3\",1650\r\nOK",
+			"AT+QCFG=\"IMS\"":    "+QCFG: \"ims\",0,0\r\nOK",
 			"AT+QCFG=\"USBNET\"": "+QCFG: \"usbnet\",1\r\nOK",
 			"AT+QCFG=\"USBCFG\"": "+QCFG: \"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,0\r\nOK",
 			"AT+CGDCONT?":        "+CGDCONT: 1,\"IPV4V6\",\"3gnet\",\"0.0.0.0\",0,0,0,0\r\nOK",
@@ -1551,6 +1623,47 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 		"mode":         body.Mode,
 		"response":     response,
 		"needs_reboot": true,
+	})
+}
+
+func (a *app) enableIMS(w http.ResponseWriter, _ *http.Request) {
+	current, err := a.runATCommand(`AT+QCFG="ims"`, 5*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "query IMS status: "+err.Error())
+		return
+	}
+	_, available, ok := parseUSBATIMS(current)
+	if !ok {
+		writeError(w, http.StatusBadGateway, "module does not expose a compatible IMS setting: "+current)
+		return
+	}
+	if available == 1 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"enabled":       true,
+			"already_ready": true,
+			"restarting":    false,
+		})
+		return
+	}
+
+	response, err := a.runATCommand(`AT+QCFG="ims",1`, 5*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "enable IMS: "+err.Error())
+		return
+	}
+	if !atProbeSucceeded(response) {
+		writeError(w, http.StatusBadGateway, "enable IMS failed: "+response)
+		return
+	}
+	rebootResponse, err := a.runATCommand("AT+CFUN=1,1", 3*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "IMS was enabled but module restart failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"enabled":    true,
+		"restarting": true,
+		"response":   rebootResponse,
 	})
 }
 
