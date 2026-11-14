@@ -225,6 +225,7 @@ async function loadStatus() {
       status.sim_inserted ? "已插入" : (status.usb_device ? "待读取" : "未检测到"),
       status.sim_inserted ? "good" : (status.usb_device ? "warn" : "bad"),
     );
+    setValue("#ims", status.ims_status === 1 ? "已启用" : "未启用", status.ims_status === 1 ? "good" : "warn");
     const workMode = Object.prototype.hasOwnProperty.call(status, "usbnet_mode")
       ? displayWorkMode(status.usbnet_mode)
       : displayWorkMode(null);
@@ -744,6 +745,40 @@ async function rebootModule() {
   }
 }
 
+async function enableIMS() {
+  const confirmed = await showModal({
+    title: "启用 IMS 并重启模块",
+    message: "部分漫游 SIM 需要 IMS 才能在 LTE 网络收发短信。该操作会写入 IMS 配置并软重启模块，USB 将短暂断开。",
+    confirmLabel: "启用并重启",
+  });
+  if (!confirmed) return;
+  const button = $("#enable-ims");
+  const status = $("#ims-status");
+  button.disabled = true;
+  status.textContent = "正在检查并启用 IMS...";
+  try {
+    const result = await api("/api/network/enable-ims", { method: "POST" });
+    if (result.already_ready) {
+      status.textContent = "IMS 已启用，无需重启。";
+      notice("IMS 已启用");
+      button.disabled = false;
+      await loadStatus();
+      return;
+    }
+    status.textContent = "IMS 已写入，模块正在重启；等待重新枚举后自动刷新。";
+    notice("IMS 启用中");
+    setTimeout(loadStatus, 8000);
+    setTimeout(() => {
+      button.disabled = false;
+      status.textContent = "请确认首页 IMS 状态已变为“已启用”。";
+    }, 13000);
+  } catch (error) {
+    status.textContent = `启用 IMS 失败：${error.message}`;
+    notice(error.message);
+    button.disabled = false;
+  }
+}
+
 async function loadESIM() {
   const list = $("#esim-list");
   const status = $("#esim-status");
@@ -1102,6 +1137,7 @@ $("#usbnet-mode-1").addEventListener("click", () => setUSBNetMode(1));
 $("#usbnet-mode-2").addEventListener("click", () => setUSBNetMode(2));
 $("#usbnet-mode-3").addEventListener("click", () => setUSBNetMode(3));
 $("#reboot-module").addEventListener("click", rebootModule);
+$("#enable-ims").addEventListener("click", enableIMS);
 
 loadStatus();
 loadSMS();
